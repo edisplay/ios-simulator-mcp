@@ -9,6 +9,49 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 
+type LaunchArgsInput = {
+  udid: string;
+  bundleId: string;
+  terminateRunning?: boolean;
+  env?: Record<string, string>;
+};
+
+type LaunchArgsOutput = {
+  args: string[];
+  env: Record<string, string>;
+};
+
+export function buildLaunchArgs({
+  udid,
+  bundleId,
+  terminateRunning,
+  env,
+}: LaunchArgsInput): LaunchArgsOutput {
+  const args: string[] = ["launch"];
+
+  if (terminateRunning) {
+    args.push("--terminate-running-process");
+  }
+
+  const simctlEnv: Record<string, string> = {};
+
+  if (env) {
+    const entries = Object.entries(env)
+      .map(([key, value]) => [key.trim(), value] as const)
+      .sort(([a], [b]) => a.localeCompare(b));
+
+    for (const [key, value] of entries) {
+      if (!key) {
+        throw new Error("Environment variable keys must be non-empty.");
+      }
+      simctlEnv[`SIMCTL_CHILD_${key}`] = value;
+    }
+  }
+
+  args.push(udid, bundleId);
+  return { args, env: simctlEnv };
+}
+
 const execFileAsync = promisify(execFile);
 
 /**
@@ -27,11 +70,22 @@ const TMP_ROOT_DIR = fs.mkdtempSync(
  * @param args - The arguments to pass to the command
  * @returns The stdout and stderr of the command
  */
+type RunOptions = {
+  env?: Record<string, string>;
+};
+
 async function run(
   cmd: string,
-  args: string[]
+  args: string[],
+  options: RunOptions = {}
 ): Promise<{ stdout: string; stderr: string }> {
-  const { stdout, stderr } = await execFileAsync(cmd, args, { shell: false });
+  const mergedEnv = options.env
+    ? { ...process.env, ...options.env }
+    : process.env;
+  const { stdout, stderr } = await execFileAsync(cmd, args, {
+    shell: false,
+    env: mergedEnv,
+  });
   return {
     stdout: stdout.trim(),
     stderr: stderr.trim(),
@@ -999,20 +1053,27 @@ if (!isToolFiltered("launch_app")) {
         .describe(
           "Terminate the app if it is already running before launching"
         ),
+      env: z
+        .record(z.string())
+        .optional()
+        .describe("Environment variables to pass to simctl launch"),
     },
     { title: "Launch App", readOnlyHint: false, openWorldHint: true },
-    async ({ udid, bundle_id, terminate_running }) => {
+    async ({ udid, bundle_id, terminate_running, env }) => {
       try {
         const actualUdid = await getBootedDeviceId(udid);
 
+        const { args, env: simctlEnv } = buildLaunchArgs({
+          udid: actualUdid,
+          bundleId: bundle_id,
+          terminateRunning: terminate_running,
+          env,
+        });
+
         // run() will throw if the command fails (non-zero exit code)
-        const { stdout } = await run("xcrun", [
-          "simctl",
-          "launch",
-          ...(terminate_running ? ["--terminate-running-process"] : []),
-          actualUdid,
-          bundle_id,
-        ]);
+        const { stdout } = await run("xcrun", ["simctl", ...args], {
+          env: simctlEnv,
+        });
 
         // Extract PID from output if available
         // simctl launch outputs the PID as the first token in stdout
